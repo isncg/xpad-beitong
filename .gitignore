@@ -1,7 +1,7 @@
-# 本地 AUR 克隆（带上游提交历史），不属于本仓库
+# Local AUR clone (carries the upstream commit history); not part of this repo
 aur-contrib/
 
-# 编译 / 打包产物
+# Build and packaging artifacts
 .build-test/
 src/
 pkg/

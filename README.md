@@ -34,6 +34,10 @@ the sequence repeats three times before it stops on the last one. Raw log:
 [07:37:00] 057e:2009  ... Switch Pro Controller           <- final state
 ```
 
+The log was captured with an earlier revision of `capture.sh`; its
+`<无匹配设备>` placeholder means "no matching device" (the current script prints
+`<no matching device>`).
+
 The USB device number changes between steps, so this is a real detach and
 re-attach, not a soft reset.
 
@@ -84,7 +88,7 @@ happen inside that window.
 | [`Makefile`](Makefile) / [`dkms.conf`](dkms.conf) | Out-of-tree module build and DKMS configuration |
 | [`install.sh`](install.sh) / [`uninstall.sh`](uninstall.sh) | Local DKMS install and rollback |
 | [`capture.sh`](capture.sh) | Diagnostic that captures the USB identity during plug and unplug |
-| [`docs/dkms-manual.md`](docs/dkms-manual.md) | Manual build, verification and troubleshooting (Chinese) |
+| [`docs/dkms-manual.md`](docs/dkms-manual.md) | Manual build, verification and troubleshooting |
 | [`evidence/`](evidence/) | The captured identity cycle |
 | [`aur/`](aur/) | Fixed packaging for AUR `xpad-beitong-dkms`, plus a ready-to-send `0001-*.patch` |
 | [`LICENSE`](LICENSE) | GPL-2.0-only (derived from the kernel's `xpad.c`) |
