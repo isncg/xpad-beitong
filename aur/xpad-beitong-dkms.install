@@ -1,0 +1,36 @@
+## arg 1: new package version (pkgver-pkgrel)
+
+post_install() {
+  local ver="${1%%-*}"
+  echo ":: Building and installing xpad-beitong/${ver} via DKMS..."
+  # Do NOT swallow the exit status here. Silently ignoring a failed build is
+  # how this package shipped broken: the user ends up with the stock xpad and
+  # no indication that anything went wrong.
+  if ! dkms install "xpad-beitong/${ver}" --force; then
+    echo "!! dkms install failed for $(uname -r)." >&2
+    echo "   Install the matching headers first, e.g. 'pacman -S linux-headers'," >&2
+    echo "   then re-run: sudo dkms install xpad-beitong/${ver} --force" >&2
+    return 1
+  fi
+  echo ":: Reloading xpad; unplug and replug the controller afterwards."
+  modprobe -r xpad 2>/dev/null || true
+  modprobe xpad 2>/dev/null || true
+}
+
+## arg 1: new package version
+## arg 2: old package version
+
+post_upgrade() {
+  local old_ver="${2%%-*}"
+  dkms remove "xpad-beitong/${old_ver}" --all &>/dev/null || true
+  post_install "$1"
+}
+
+## arg 1: old package version
+
+pre_remove() {
+  local ver="${1%%-*}"
+  modprobe -r xpad 2>/dev/null || true
+  dkms remove "xpad-beitong/${ver}" --all 2>/dev/null || true
+  echo ":: xpad-beitong removed. The in-tree xpad takes over on next plug/unplug."
+}

@@ -1,0 +1,1043 @@
+From 9a112717e96a7afc06ac5dca87638e805f580d8e Mon Sep 17 00:00:00 2001
+From: Arch Contributor <contributor@example.invalid>
+Date: Sun, 4 Oct 2026 09:14:33 +0800
+Subject: [PATCH] Fix build (linux-headers ship no sources) and add the MS OS
+ 0xEE handshake
+
+prepare() looked for xpad.c under /usr/lib/modules/*/build/drivers/input/
+joystick/, but Arch's linux-headers ships headers only - there is no driver
+source in that tree (78 .c files vs 7493 .h). The build therefore always died
+with "xpad.c not found in any kernel headers", and the scriptlet then hid that
+by swallowing every dkms exit status. Fetch xpad.c from the matching kernel tag
+instead, and stop ignoring failures.
+
+Functionally, the GIP init packets 1.0 shipped are not sufficient. Measured on
+a wired BTP-KP20D (20bc:5158): with the module loaded, xpad binds and the
+packets are sent, yet the firmware still power-cycles into Switch emulation
+(057e:2009) about 2s later. What it is actually waiting for is the Microsoft OS
+descriptor request at index 0xEE that Windows issues while discovering the
+"XUSB10" compatible ID. Hardware result:
+
+  raw=0    vendor bRequest=0xEE, wValue=0, wIndex=4   <- works, device stays
+  str=-11  standard GET_DESCRIPTOR(STRING, 0xEE)      <- firmware times out
+
+Send the raw form first (the decision window is only ~2s) and keep the standard
+form as a fallback for other KP models. The handshake now also runs from
+probe(), not only when userspace opens the input device.
+
+Other changes:
+  * real checksums instead of SKIP; SPDX license identifier
+  * drop LLVM=1 - it forces clang/lld, which are not in makedepends
+  * stop shipping xpad.ko inside the package; DKMS owns that path
+  * surface dkms failures instead of silencing them
+  * stop duplicating the 0x5134/0x514a device table entries
+
+Verified: the patched xpad.c is byte-identical to the hardware-tested tree, and
+makepkg completes cleanly on 7.2.8-arch1-2.
+---
+ .SRCINFO                   |  17 ++-
+ .gitignore                 |   8 ++
+ Makefile                   |  10 +-
+ PKGBUILD                   | 116 +++++++++--------
+ README.md                  | 124 ++++++++++--------
+ README_zh_CN.md            | 106 +++++++++-------
+ beitong-gip-init.patch     | 114 -----------------
+ beitong-ms-os-xinput.patch | 254 +++++++++++++++++++++++++++++++++++++
+ dkms.conf                  |   4 +-
+ xpad-beitong-dkms.install  |  35 +++--
+ 10 files changed, 491 insertions(+), 297 deletions(-)
+ create mode 100644 .gitignore
+ delete mode 100644 beitong-gip-init.patch
+ create mode 100644 beitong-ms-os-xinput.patch
+
+diff --git a/.SRCINFO b/.SRCINFO
+index ba79929..775e086 100644
+--- a/.SRCINFO
++++ b/.SRCINFO
+@@ -1,17 +1,20 @@
+ pkgbase = xpad-beitong-dkms
+-	pkgdesc = DKMS module for patched xpad with Beitong KP-series 2.4G gamepad fix
+-	pkgver = 1.0
++	pkgdesc = DKMS module for patched xpad with Beitong/Betop KP-series XInput handshake
++	pkgver = 2.0
+ 	pkgrel = 1
+ 	url = https://github.com/675076143/xpad-beitong-dkms
+ 	install = xpad-beitong-dkms.install
+ 	arch = any
+-	license = GPL2
++	license = GPL-2.0-only
++	makedepends = linux-headers
+ 	depends = dkms
+-	source = beitong-gip-init.patch
++	source = xpad.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/input/joystick/xpad.c?h=v7.2.8
++	source = beitong-ms-os-xinput.patch
+ 	source = Makefile
+ 	source = dkms.conf
+-	sha256sums = SKIP
+-	sha256sums = SKIP
+-	sha256sums = SKIP
++	sha256sums = 19dd00fc4b0341ef18575a87b9b3fbd5f809e4588ff2909e2c357af2f2358517
++	sha256sums = eae0fab6a391334421a9717ef117807d7895ea227d5f9bb5773a50a9e42bdec4
++	sha256sums = 73b8c36fe16fe1dd000c0fc397b2b97474856b1365e5187b9ff038247faf3940
++	sha256sums = 70d2b1ddee18c63c46ea7bc8ffdfb29c6afdfcb79c5868b00a5b98bbfb611152
+ 
+ pkgname = xpad-beitong-dkms
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..a89038a
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,8 @@
++# makepkg artifacts
++src/
++pkg/
++*.pkg.tar.*
++*.log
++
++# Downloaded source (fetched from git.kernel.org per the PKGBUILD)
++xpad.c
+diff --git a/Makefile b/Makefile
+index 8dd760e..16ac2bb 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,10 +1,10 @@
++# Only needed for manual out-of-tree builds; DKMS drives the real build
++# through dkms.conf. Do not hardcode LLVM=1 here or in dkms.conf: the
++# kernel defaults to gcc and clang/lld are not guaranteed to be installed.
+ obj-m := xpad.o
+ 
+ all:
+-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) LLVM=1 modules
++	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+ 
+ clean:
+-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) LLVM=1 clean
+-
+-install:
+-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) LLVM=1 modules_install
++	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+diff --git a/PKGBUILD b/PKGBUILD
+index ea13e4f..43a904c 100644
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -1,86 +1,98 @@
+ # Maintainer: 675076143 <675076143@qq.com>
+ #
+-# Patch by Zixing Liu that adds FLAG_FORCE_INIT to xpad.c, sending GIP
+-# (Game Input Protocol) initialization packets (ACK + ANNOUNCE) to Beitong
+-# KP-series 2.4G gamepads during probing, fixing the firmware's
+-# OS-detection-based disconnect loop.
++# Patched xpad for Beitong/Betop KP-series controllers (VID 0x20bc).
++#
++# Background
++# ----------
++# These controllers boot into an Xbox personality and only stay there if the
++# host completes the handshake Windows performs while enumerating. Linux USB
++# core never does, so the firmware power-cycles itself through its remaining
++# personalities and finally settles on Nintendo Switch Pro Controller
++# emulation (057e:2009). Steam then reports a "Nintendo" controller.
++#
++# What changed in 2.0
++# -------------------
++# * 1.0 shipped Zixing Liu's FLAG_FORCE_INIT alone, which only sends Xbox One
++#   GIP init packets. Measured on a wired BTP-KP20D (20bc:5158): xpad binds
++#   and the packets do go out, but the firmware still switches away ~2s later.
++#   GIP packets alone are not sufficient.
++# * 2.0 adds the Microsoft OS descriptor request at index 0xEE - the request
++#   Windows issues while discovering the "XUSB10" compatible ID, and the one
++#   that actually pins this firmware to XInput. Verified on hardware: the
++#   device answers it with 0 and then stays on 20bc:5158 indefinitely.
++#   GIP init packets are kept for the other KP models.
++# * The handshake now runs from probe() as well as on input open. The
++#   firmware's decision window is only ~2s, which userspace opening
++#   /dev/input/eventX cannot be relied on to beat.
++#
++# xpad.c is fetched from the matching kernel tag instead of being read out of
++# linux-headers: Arch's linux-headers ships headers only, no driver sources,
++# so the 1.0 prepare() could never succeed.
++# When Arch bumps the kernel, bump _kbase and the sha256sums entry.
++# The patch is small and applies with offsets, so a newer base usually works
++# even without bumping.
++
++_kbase=7.2.8
+ 
+ pkgname=xpad-beitong-dkms
+-pkgver=1.0
++pkgver=2.0
+ pkgrel=1
+-pkgdesc='DKMS module for patched xpad with Beitong KP-series 2.4G gamepad fix'
++pkgdesc='DKMS module for patched xpad with Beitong/Betop KP-series XInput handshake'
+ arch=('any')
+ url='https://github.com/675076143/xpad-beitong-dkms'
+-license=('GPL2')
++license=('GPL-2.0-only')
+ depends=('dkms')
++makedepends=('linux-headers')
+ install="${pkgname}.install"
+ source=(
+-  'beitong-gip-init.patch'
++  "xpad.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/input/joystick/xpad.c?h=v${_kbase}"
++  'beitong-ms-os-xinput.patch'
+   'Makefile'
+   'dkms.conf'
+ )
+-sha256sums=('SKIP' 'SKIP' 'SKIP')
++sha256sums=('19dd00fc4b0341ef18575a87b9b3fbd5f809e4588ff2909e2c357af2f2358517'
++            'eae0fab6a391334421a9717ef117807d7895ea227d5f9bb5773a50a9e42bdec4'
++            '73b8c36fe16fe1dd000c0fc397b2b97474856b1365e5187b9ff038247faf3940'
++            '70d2b1ddee18c63c46ea7bc8ffdfb29c6afdfcb79c5868b00a5b98bbfb611152')
+ 
+ prepare() {
+-  local src
+-  for d in /usr/lib/modules/*/build/drivers/input/joystick; do
+-    if [[ -f "${d}/xpad.c" ]]; then
+-      src="${d}/xpad.c"
+-      break
+-    elif [[ -f "${d}/xpad.c.zst" ]]; then
+-      src="${d}/xpad.c.zst"
+-      break
+-    fi
+-  done
+-
+-  if [[ -z "${src}" ]]; then
+-    error 'xpad.c not found in any kernel headers'
+-    error 'Install linux-headers for your running kernel (e.g. linux-headers)'
+-    exit 1
+-  fi
+-
+-  msg2 "Using xpad.c from: ${src}"
+-
+-  if [[ "${src}" == *.zst ]]; then
+-    zstd -d -f "${src}" -o "${srcdir}/xpad.c"
+-  else
+-    cp "${src}" "${srcdir}/xpad.c"
+-  fi
++  cd "${srcdir}"
+ 
+-  msg2 "Copied xpad.c ($(wc -l < xpad.c) lines)"
++  # makepkg links non-archive sources into $srcdir rather than copying them,
++  # and patch(1) refuses to operate on a symlink ("not a regular file").
++  # Materialise a real file first; cp -L + mv so we never write back through
++  # the symlink into the source directory.
++  cp -L xpad.c xpad.c.prepared
++  mv -f xpad.c.prepared xpad.c
+ 
+-  cd "${srcdir}"
+-  patch -Np0 -i beitong-gip-init.patch
++  patch -Np0 -i beitong-ms-os-xinput.patch
+ }
+ 
+ build() {
+   cd "${srcdir}"
+ 
+-  local running_kernel="$(uname -r)"
+-  local kdir="/usr/lib/modules/${running_kernel}/build"
+-
++  local kdir="/usr/lib/modules/$(uname -r)/build"
+   if [[ ! -d "${kdir}" ]]; then
+-    warning "Kernel build dir not found for ${running_kernel}. DKMS will build at install time."
++    echo "WARNING: kernel build dir for $(uname -r) not found; DKMS will build at install time." >&2
+     return 0
+   fi
+ 
+-  msg2 "Building for kernel ${running_kernel}..."
+-  make -C "${kdir}" M="${srcdir}" LLVM=1 modules
++  echo "Building for kernel $(uname -r)..."
++  make -C "${kdir}" M="${srcdir}" modules
+ }
+ 
+ package() {
+   cd "${srcdir}"
+-  local dkms_dst="${pkgdir}/usr/src/xpad-beitong-${pkgver}"
++  local dst="${pkgdir}/usr/src/xpad-beitong-${pkgver}"
+ 
+-  install -Dm644 xpad.c               "${dkms_dst}/xpad.c"
+-  install -Dm644 beitong-gip-init.patch "${dkms_dst}/beitong-gip-init.patch"
+-  install -Dm644 Makefile             "${dkms_dst}/Makefile"
++  install -Dm644 xpad.c                    "${dst}/xpad.c"
++  install -Dm644 beitong-ms-os-xinput.patch "${dst}/beitong-ms-os-xinput.patch"
++  install -Dm644 Makefile                  "${dst}/Makefile"
+ 
+-  sed "s/@PKGVER@/${pkgver}/g" "${srcdir}/dkms.conf" > "${dkms_dst}/dkms.conf"
+-  chmod 644 "${dkms_dst}/dkms.conf"
++  sed "s/@PKGVER@/${pkgver}/g" dkms.conf > "${dst}/dkms.conf"
++  chmod 644 "${dst}/dkms.conf"
+ 
+-  local running_kernel="$(uname -r)"
+-  if [[ -f xpad.ko ]]; then
+-    install -Dm644 xpad.ko "${pkgdir}/usr/lib/modules/${running_kernel}/updates/dkms/xpad.ko"
+-  fi
++  # The built module is intentionally NOT installed here. DKMS owns
++  # /usr/lib/modules/<kver>/updates/dkms/xpad.ko; shipping a copy in the
++  # package as well makes the package and DKMS fight over that path.
+ }
+diff --git a/README.md b/README.md
+index 3e15158..4e0f393 100644
+--- a/README.md
++++ b/README.md
+@@ -1,86 +1,108 @@
+ # xpad-beitong-dkms
+ 
+-**Temporary** DKMS module for patched `xpad` with Beitong KP-series 2.4G gamepad fix. Will be deprecated once the patch is merged upstream (expected Linux 7.3 or later).
++**Temporary** DKMS package with a patched `xpad` for Beitong (北通) / Betop
++KP-series controllers that refuse to stay in their XInput personality on Linux.
++Deprecated once the fix lands upstream.
+ 
+ ## Problem
+ 
+-Beitong (北通) KP-series gamepads (KP20A, KP40A, KP50B, etc.) disconnect every ~1s when using the 2.4G wireless receiver on Linux. The firmware detects the host OS and power-cycles the USB connection if it doesn't receive specific Xbox One GIP (Game Input Protocol) initialization packets.
++These controllers boot into an Xbox personality and stay there only if the host
++performs the handshake Windows does while enumerating. Linux USB core never does,
++so the firmware power-cycles through its remaining personalities and finally
++settles on Nintendo Switch Pro Controller emulation (`057e:2009`). Steam then
++reports a "Nintendo" controller and XInput-only software cannot see the pad.
+ 
+-**Symptoms:** USB device `20bc:5127` cycles connect/disconnect continuously; Bluetooth and USB-wired modes work fine.
++Captured on a wired BTP-KP20D — each step lasts ~2s and the cycle repeats 3x
++before it stops on the last one:
+ 
+-## Fix
++```
++20bc:5158  "BTP-KP20D XINPUT WIRED"     <- xpad binds here, then it gives up
++057e:2069  "BTP-KP20D NS WIRED"
++057e:2009  "Switch Pro Controller"      <- final state
++```
+ 
+-This package applies [Zixing Liu's patch](https://lore.kernel.org/linux-input/20260102030154.197749-2-liushuyu@aosc.io) to `xpad.c`, adding `FLAG_FORCE_INIT` which sends GIP acknowledge and announce packets during controller probing. The firmware recognizes these packets and stays in XINPUT mode.
++**Symptoms**
+ 
+-The patch has been submitted upstream (v3, 2026-07-17) and is pending review. Once merged into the kernel, this DKMS package is no longer needed.
++- 2.4G receiver (`20bc:5127`): the USB device cycles connect/disconnect continuously.
++- Wired KP20D (`20bc:5158`): enumerates cleanly, then silently becomes a Nintendo
++  Switch Pro Controller about two seconds later.
+ 
+-## Installation
++## Fix
+ 
+-### From AUR
++Two parts, both required:
+ 
+-```bash
+-yay -S xpad-beitong-dkms
+-# or
+-paru -S xpad-beitong-dkms
+-```
++1. **Microsoft OS descriptor request at index 0xEE** — the request Windows issues
++   while discovering the `XUSB10` compatible ID. This is what the firmware is
++   actually waiting for. Verified on hardware: it answers the raw vendor form
++   (`bRequest=0xEE`, `wValue=0`, `wIndex=4`) with success, and the device then
++   stays on `20bc:5158` indefinitely. This firmware does *not* answer the standard
++   `GET_DESCRIPTOR(STRING, 0xEE)` form (it times out), so that path is only a
++   fallback for other KP models.
++2. **Xbox One GIP init packets** (`FLAG_FORCE_INIT`, from Zixing Liu's patch),
++   kept for the other KP models.
++
++The handshake runs from `xpad_probe()` as well as on input open: the firmware's
++decision window is only ~2 seconds, which userspace opening `/dev/input/eventX`
++cannot be relied on to beat.
+ 
+-### From source
++> GIP packets alone (what 1.0 shipped) are **not** sufficient. With 1.0 loaded,
++> `xpad` does bind to `20bc:5158` and the packets do go out, yet the device still
++> switches away ~2s later.
++
++## Installation
+ 
+ ```bash
+-git clone https://github.com/675076143/xpad-beitong-dkms.git
+-cd xpad-beitong-dkms
+-makepkg -si
++yay -S xpad-beitong-dkms
+ ```
+ 
+-After installation, reboot or run:
++Then unplug and replug the controller. Verify:
+ 
+ ```bash
+-sudo modprobe -r xpad && sudo modprobe xpad
++lsusb | grep -Ei '057e|20bc'          # expect a stable 20bc:xxxx
++sudo dmesg | grep 'Beitong XInput'    # expect: MS OS (raw=0 ...)
+ ```
+ 
+ ## Requirements
+ 
+-- `dkms` package
+-- Kernel headers for your running kernel (e.g., `linux-headers`, `linux-zen-headers`, `linux-cachyos-rc-headers`, etc.)
++- `dkms`
++- Kernel headers matching your running kernel (`linux-headers`,
++  `linux-zen-headers`, `linux-cachyos-headers`, ...)
+ 
+ ## How it works
+ 
+-1. Copies `xpad.c` from the running kernel's headers
+-2. Applies the GIP init patch
+-3. Registers with DKMS for automatic rebuilds on kernel updates
+-4. Blacklists the in-kernel `xpad` module to ensure the patched one loads
+-
+-## Compatible Devices
+-
+-The following VID:PID combinations are recognized:
+-
+-| VID | PID | Device |
+-|-----|-----|--------|
+-| 20bc | 5125-5128 | KP20A/KP40A |
+-| 20bc | 512f-5130 | KP70A |
+-| 20bc | 5133-5134 | KP50B |
+-| 20bc | 5145-5146 | KP40A/KP40B |
+-| 20bc | 5149-514a | KP50C |
+-| 20bc | 5150-5151 | KP50D |
+-| 20bc | 5152-5153 | KP50E |
+-| 20bc | 5154-5155 | KP40D |
+-| 20bc | 5158-5159 | KP20D |
+-| 20bc | 515b-515c | KP40D (White) |
+-| 20bc | 515d-515e | KP40F (White) |
+-| 20bc | 515f-5160 | KP70A |
+-| 20bc | 5169-516a | KP40F (Black) |
+-
+-## Upstream Status
++1. Fetches `xpad.c` from the kernel tag named by `_kbase` in the PKGBUILD.
++   It deliberately does **not** read driver sources out of `linux-headers`:
++   Arch ships headers only, so that approach can never succeed.
++2. Applies `beitong-ms-os-xinput.patch` (10 hunks).
++3. Hands the result to DKMS, which rebuilds it automatically on kernel updates.
++
++When Arch bumps the kernel, bump `_kbase` and its `sha256sums` entry. The patch
++is small and applies with offsets, so a slightly newer base usually works
++unchanged.
++
++The quirk can be disabled at runtime with `options xpad beitong_force_init=0` in
++`/etc/modprobe.d/`.
++
++## Compatible devices
++
++VID `0x20bc` in XInput mode: `5125-5128`, `512f-5130`, `5133-5134`, `5145-5146`,
++`5149-514a`, `5150-5153`, `5154-5155`, `5158-5159`, `515b-515e`, `515f-5160`,
++`5169-516a`.
++
++Verified end-to-end on `20bc:5158` (wired BTP-KP20D): the device stays on
++`20bc:5158`, binds `xpad`, and exposes `/dev/input/js0` + `/dev/input/event20`.
++
++## Upstream status
+ 
+ | Item | Status |
+ |------|--------|
+-| Patch author | Zixing Liu |
+-| Submitted | v3, 2026-07-17 |
+-| Target | Mainline Linux (expected 7.3 or later) |
+-| This DKMS | Deprecated after upstream merge |
++| GIP-packet half | Zixing Liu, v3 2026-07-17, pending review |
++| MS OS descriptor half | Not submitted yet |
++| This DKMS package | Deprecated once both halves are upstream |
+ 
+ ## Links
+ 
+ - [Wiki page with full investigation log](https://github.com/675076143/notes/wiki/beitong-btp-kp40a-linux-usb-disconnect)
+ - [Upstream patch discussion (linux-input)](https://lore.kernel.org/linux-input/20260102030154.197749-2-liushuyu@aosc.io/)
++- [Aaron Ma's MS OS descriptor patch for the KP20D](https://lkml.iu.edu/2607.3/02396.html)
+ - [Arch Wiki - Gamepad (ShanWan section)](https://wiki.archlinux.org/title/Gamepad)
+diff --git a/README_zh_CN.md b/README_zh_CN.md
+index 115c6e4..3d25ae8 100644
+--- a/README_zh_CN.md
++++ b/README_zh_CN.md
+@@ -1,86 +1,98 @@
+ # xpad-beitong-dkms
+ 
+-为北通 KP 系列 2.4G 手柄修复断连问题的 DKMS 内核模块。
++为北通 / Beitong·Betop KP 系列手柄打补丁的 **临时** DKMS 包：这些手柄在 Linux 上
++无法停留在 XInput 人格。修复合入上游后本包即弃用。
+ 
+ ## 问题
+ 
+-北通 KP 系列手柄（KP20A、KP40A、KP50B 等）在 Linux 上使用 2.4G 无线接收器时，每 ~1 秒断连一次。固件会检测主机操作系统类型，如果在初始化阶段未收到 Xbox One GIP（Game Input Protocol）协议包，则主动断开 USB 重连。
++这类手柄开机先进 Xbox 人格，只有在枚举阶段收到**Windows 会做的那套握手**时才肯留下。
++Linux 的 USB core 从不做这套握手，于是固件自我断电重启、逐个尝试剩下的模式，
++最后停在任天堂 Switch Pro Controller 模拟（`057e:2009`）。Steam 因此显示为
++"Nintendo" 控制器，只认 XInput 的软件也看不到它。
+ 
+-**症状：** USB 设备 `20bc:5127` 持续断连重连；蓝牙和 USB 有线模式正常工作。
++有线 BTP-KP20D 的实测序列（每段约 2 秒，重复 3 次后停在最后一项）：
++
++```
++20bc:5158  "BTP-KP20D XINPUT WIRED"     ← xpad 在这里绑定，然后它放弃了
++057e:2069  "BTP-KP20D NS WIRED"
++057e:2009  "Switch Pro Controller"      ← 最终状态
++```
++
++**症状**
++
++- 2.4G 接收器（`20bc:5127`）：USB 设备持续断连重连。
++- 有线 KP20D（`20bc:5158`）：枚举正常，约两秒后悄悄变成任天堂手柄。
+ 
+ ## 修复
+ 
+-应用 [Zixing Liu 的补丁](https://lore.kernel.org/linux-input/20260102030154.197749-2-liushuyu@aosc.io) 到 `xpad.c`，添加 `FLAG_FORCE_INIT` 标志，在手柄探测阶段发送 GIP 确认和声明包。固件收到这些包后确认主机为 Windows/Xbox 驱动，从而稳定工作在 XINPUT 模式。
++两部分缺一不可：
+ 
+-## 安装
++1. **索引 0xEE 的 Microsoft OS 描述符请求**——Windows 在探测 `XUSB10` 兼容 ID 时
++   发出的请求，也是固件真正在等的信号。真机实测：原始厂商形式
++   （`bRequest=0xEE`、`wValue=0`、`wIndex=4`）返回成功，设备随即无限期稳定在
++   `20bc:5158`。本固件**不响应**标准的 `GET_DESCRIPTOR(STRING, 0xEE)`（会超时），
++   所以那条只作为其他 KP 型号的兜底。
++2. **Xbox One GIP 初始化包**（`FLAG_FORCE_INIT`，来自 Zixing Liu 的补丁），
++   为其他 KP 型号保留。
+ 
+-### 从 AUR
++握手除了在打开输入设备时执行，也在 `xpad_probe()` 中执行：固件的决策窗口只有约 2 秒，
++不能指望用户态及时 open `/dev/input/eventX`。
+ 
+-```bash
+-yay -S xpad-beitong-dkms
+-# 或
+-paru -S xpad-beitong-dkms
+-```
++> 只发 GIP 包（1.0 的做法）**不够**。装 1.0 时 `xpad` 确实绑定到了 `20bc:5158`
++> 且包也确实发了出去，设备仍在约 2 秒后切换。
+ 
+-### 从源码
++## 安装
+ 
+ ```bash
+-git clone https://github.com/675076143/xpad-beitong-dkms.git
+-cd xpad-beitong-dkms
+-makepkg -si
++yay -S xpad-beitong-dkms
+ ```
+ 
+-安装完成后，重启或执行：
++然后拔插一次手柄。验证：
+ 
+ ```bash
+-sudo modprobe -r xpad && sudo modprobe xpad
++lsusb | grep -Ei '057e|20bc'          # 期望稳定在 20bc:xxxx
++sudo dmesg | grep 'Beitong XInput'    # 期望 MS OS (raw=0 ...)
+ ```
+ 
+ ## 依赖
+ 
+-- `dkms` 包
+-- 当前内核对应的 headers 包（如 `linux-headers`、`linux-zen-headers`、`linux-cachyos-rc-headers` 等）
++- `dkms`
++- 与运行内核匹配的 headers（`linux-headers`、`linux-zen-headers`、
++  `linux-cachyos-headers` 等）
+ 
+ ## 工作原理
+ 
+-1. 从当前内核 headers 复制 `xpad.c`
+-2. 应用 GIP 初始化补丁
+-3. 注册 DKMS，内核更新后自动重编
+-4. 添加 modprobe 黑名单屏蔽内核自带的 `xpad` 模块
++1. 按 PKGBUILD 里的 `_kbase` 从对应内核 tag 下载 `xpad.c`。
++   **刻意不从 `linux-headers` 里取驱动源码**——Arch 的 headers 不含 `.c` 文件，
++   那条路根本走不通。
++2. 应用 `beitong-ms-os-xinput.patch`（10 个 hunk）。
++3. 交给 DKMS，内核更新后自动重编。
++
++Arch 升级内核时，把 `_kbase` 和对应的 `sha256sums` 一起更新即可。补丁很小、
++可以带偏移应用，所以稍新的 base 通常无需改动。
++
++运行时可用 `/etc/modprobe.d/` 里的 `options xpad beitong_force_init=0` 关闭该行为。
+ 
+ ## 兼容设备
+ 
+-以下 VID:PID 组合受支持：
+-
+-| VID | PID | 设备 |
+-|-----|-----|------|
+-| 20bc | 5125-5128 | KP20A/KP40A |
+-| 20bc | 512f-5130 | KP70A |
+-| 20bc | 5133-5134 | KP50B |
+-| 20bc | 5145-5146 | KP40A/KP40B |
+-| 20bc | 5149-514a | KP50C |
+-| 20bc | 5150-5151 | KP50D |
+-| 20bc | 5152-5153 | KP50E |
+-| 20bc | 5154-5155 | KP40D |
+-| 20bc | 5158-5159 | KP20D |
+-| 20bc | 515b-515c | KP40D（白色） |
+-| 20bc | 515d-515e | KP40F（白色） |
+-| 20bc | 515f-5160 | KP70A |
+-| 20bc | 5169-516a | KP40F（黑色） |
+-
+-**临时性** DKMS 包，补丁合入主线后弃用（预计 Linux 7.3+）。
++XInput 模式下 VID 为 `0x20bc` 的：`5125-5128`、`512f-5130`、`5133-5134`、
++`5145-5146`、`5149-514a`、`5150-5153`、`5154-5155`、`5158-5159`、`515b-515e`、
++`515f-5160`、`5169-516a`。
++
++`20bc:5158`（有线 BTP-KP20D）已端到端验证：稳定停在 `20bc:5158`、绑定 `xpad`、
++生成 `/dev/input/js0` 与 `/dev/input/event20`。
+ 
+ ## 上游状态
+ 
+ | 项目 | 状态 |
+ |------|------|
+-| 补丁作者 | Zixing Liu |
+-| 已提交 | v3，2026-07-17 |
+-| 目标 | Linux 主线（预计 7.3 或后续） |
+-| 本包 | 合入后弃用 |
++| GIP 包部分 | Zixing Liu，v3 2026-07-17，待评审 |
++| MS OS 描述符部分 | 尚未提交 |
++| 本 DKMS 包 | 两部分都合入后弃用 |
+ 
+ ## 链接
+ 
+ - [完整排查记录（Wiki）](https://github.com/675076143/notes/wiki/beitong-btp-kp40a-linux-usb-disconnect)
+ - [上游补丁讨论 (linux-input)](https://lore.kernel.org/linux-input/20260102030154.197749-2-liushuyu@aosc.io/)
+-- [Arch Wiki - Gamepad（ShanWan 章节）](https://wiki.archlinux.org/title/Gamepad)
++- [Aaron Ma 针对 KP20D 的 MS OS 描述符补丁](https://lkml.iu.edu/2607.3/02396.html)
++- [Arch Wiki - Gamepad（ShanWan 章节）](https://archlinux.org/title/Gamepad)
+diff --git a/beitong-gip-init.patch b/beitong-gip-init.patch
+deleted file mode 100644
+index 60e90c5..0000000
+--- a/beitong-gip-init.patch
++++ /dev/null
+@@ -1,114 +0,0 @@
+---- xpad.c	2026-07-23 01:20:34.193648960 +0800
+-+++ xpad.c	2026-07-23 01:10:02.961977997 +0800
+-@@ -72,6 +72,7 @@
+- #define PKT_XBE2_FW_5_11    4
+- 
+- #define FLAG_DELAY_INIT BIT(0)
+-+#define FLAG_FORCE_INIT BIT(1)
+- 
+- static bool dpad_to_buttons;
+- module_param(dpad_to_buttons, bool, S_IRUGO);
+-@@ -332,6 +333,34 @@
+- 	{ 0x1bad, 0xfd00, "Razer Onza TE", 0, XTYPE_XBOX360 },
+- 	{ 0x1bad, 0xfd01, "Razer Onza", 0, XTYPE_XBOX360 },
+- 	{ 0x1ee9, 0x1590, "ZOTAC Gaming Zone", 0, XTYPE_XBOX360 },
+-+	{ 0x20bc, 0x5125, "Beitong KP20A/KP40A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5126, "Beitong KP20A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5127, "Beitong KP20A/KP40A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5128, "Beitong KP20A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x512f, "Beitong KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5130, "Beitong KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5133, "Beitong KP50B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5134, "Beitong KP50B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5145, "Beitong KP40A/KP40B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5146, "Beitong KP40A/KP40B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5149, "Beitong KP50C Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x514a, "Beitong KP50C Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5150, "Beitong KP50D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5151, "Beitong KP50D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5152, "Beitong KP50E Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5153, "Beitong KP50E Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5154, "Beitong KP40D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5155, "Beitong KP40D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5158, "Beitong KP20D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5159, "Beitong KP20D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x515b, "Beitong KP40D Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x515c, "Beitong KP40D Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x515d, "Beitong KP40F Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x515e, "Beitong KP40F Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x515f, "Beitong KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5160, "Beitong KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x5169, "Beitong KP40F Controller (Black)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+-+	{ 0x20bc, 0x516a, "Beitong KP40F Controller (Black)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+- 	{ 0x20bc, 0x5134, "BETOP BTP-KP50B Xinput Dongle", 0, XTYPE_XBOX360 },
+- 	{ 0x20bc, 0x514a, "BETOP BTP-KP50C Xinput Dongle", 0, XTYPE_XBOX360 },
+- 	{ 0x20d6, 0x2001, "BDA Xbox Series X Wired Controller", 0, XTYPE_XBOXONE },
+-@@ -703,6 +732,15 @@
+- };
+- 
+- /*
+-+ * Beitong controllers require a specific sequence of
+-+ * acknowledge and probe packets during initialization to
+-+ * enter the XINPUT mode correctly.
+-+ */
+-+static const u8 btp_ack_probe_packet[] = { GIP_CMD_ACK, 0x3, GIP_SEQ0 };
+-+static const u8 btp_probe_response_packet[] = { GIP_CMD_ANNOUNCE, 0x8,
+-+						GIP_SEQ0 };
+-+
+-+/*
+-  * This specifies the selection of init packets that a gamepad
+-  * will be sent on init *and* the order in which they will be
+-  * sent. The correct sequence number will be added when the
+-@@ -717,6 +755,10 @@
+- 	XBOXONE_INIT_PKT(0x045e, 0x0b00, extra_input_packet_init),
+- 	XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_led_on),
+- 	XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_auth_done),
+-+	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
+-+	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_probe_response_packet),
+-+	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
+-+	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
+- 	XBOXONE_INIT_PKT(0x24c6, 0x541a, xboxone_rumblebegin_init),
+- 	XBOXONE_INIT_PKT(0x24c6, 0x542a, xboxone_rumblebegin_init),
+- 	XBOXONE_INIT_PKT(0x24c6, 0x543a, xboxone_rumblebegin_init),
+-@@ -778,6 +820,7 @@
+- 	time64_t mode_btn_down_ts;
+- 	bool delay_init;		/* init packets should be delayed */
+- 	bool delayed_init_done;
+-+	bool force_init;		/* send init packets even if it is not a xbox one device */
+- };
+- 
+- static int xpad_init_input(struct usb_xpad *xpad);
+-@@ -1253,7 +1296,7 @@
+- {
+- 	const struct xboxone_init_packet *init_packet;
+- 
+--	if (xpad->xtype != XTYPE_XBOXONE)
+-+	if (xpad->xtype != XTYPE_XBOXONE && !xpad->force_init)
+- 		return false;
+- 
+- 	/*
+-@@ -1787,6 +1830,15 @@
+- 	}
+- 	if (xpad->xtype == XTYPE_XBOX360) {
+- 		/*
+-+		 * Some third-party Xbox 360-style controllers
+-+		 * require sending Xbox One messages to finish initialization.
+-+		 */
+-+		{
+-+			guard(spinlock_irqsave)(&xpad->odata_lock);
+-+			xpad_prepare_next_init_packet(xpad);
+-+		}
+-+
+-+		/*
+- 		 * Some third-party controllers Xbox 360-style controllers
+- 		 * require this message to finish initialization.
+- 		 */
+-@@ -2082,6 +2134,8 @@
+- 	xpad->name = xpad_device[i].name;
+- 	if (xpad_device[i].flags & FLAG_DELAY_INIT)
+- 		xpad->delay_init = true;
+-+	if (xpad_device[i].flags & FLAG_FORCE_INIT)
+-+		xpad->force_init = true;
+- 
+- 	xpad->packet_type = PKT_XB;
+- 	INIT_WORK(&xpad->work, xpad_presence_work);
+diff --git a/beitong-ms-os-xinput.patch b/beitong-ms-os-xinput.patch
+new file mode 100644
+index 0000000..0c04663
+--- /dev/null
++++ b/beitong-ms-os-xinput.patch
+@@ -0,0 +1,254 @@
++--- xpad.c
+++++ xpad.c
++@@ -72,11 +72,24 @@
++ #define PKT_XBE2_FW_5_11    4
++ 
++ #define FLAG_DELAY_INIT BIT(0)
+++#define FLAG_FORCE_INIT BIT(1)	/* send Xbox One init packets even for XTYPE_XBOX360 */
++ 
++ static bool dpad_to_buttons;
++ module_param(dpad_to_buttons, bool, S_IRUGO);
++ MODULE_PARM_DESC(dpad_to_buttons, "Map D-PAD to buttons rather than axes for unknown pads");
++ 
+++/*
+++ * Beitong/Betop (VID 0x20bc) KP-series controllers boot into an Xbox
+++ * personality and only stay there if the host sends them the Xbox One
+++ * initialisation packets. Linux USB core does not do the Microsoft OS
+++ * descriptor dance Windows does, so without this they power-cycle a few
+++ * times and fall back to a Nintendo Switch Pro Controller emulation.
+++ * Set to 0 to restore stock behaviour.
+++ */
+++static bool beitong_force_init = true;
+++module_param(beitong_force_init, bool, 0644);
+++MODULE_PARM_DESC(beitong_force_init, "Force Xbox One init packets for Beitong/Betop (0x20bc) controllers");
+++
++ static bool triggers_to_buttons;
++ module_param(triggers_to_buttons, bool, S_IRUGO);
++ MODULE_PARM_DESC(triggers_to_buttons, "Map triggers to buttons rather than axes for unknown pads");
++@@ -341,6 +354,32 @@
++ 	{ 0x1ee9, 0x1590, "ZOTAC Gaming Zone", 0, XTYPE_XBOX360 },
++ 	{ 0x20bc, 0x5134, "BETOP BTP-KP50B Xinput Dongle", 0, XTYPE_XBOX360 },
++ 	{ 0x20bc, 0x514a, "BETOP BTP-KP50C Xinput Dongle", 0, XTYPE_XBOX360 },
+++	{ 0x20bc, 0x5125, "Beitong BTP-KP20A/KP40A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5126, "Beitong BTP-KP20A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5127, "Beitong BTP-KP20A/KP40A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5128, "Beitong BTP-KP20A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x512f, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5130, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5133, "Beitong BTP-KP50B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5145, "Beitong BTP-KP40A/KP40B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5146, "Beitong BTP-KP40A/KP40B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5149, "Beitong BTP-KP50C Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5150, "Beitong BTP-KP50D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5151, "Beitong BTP-KP50D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5152, "Beitong BTP-KP50E Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5153, "Beitong BTP-KP50E Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5154, "Beitong BTP-KP40D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5155, "Beitong BTP-KP40D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5158, "Beitong BTP-KP20D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5159, "Beitong BTP-KP20D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x515b, "Beitong BTP-KP40D Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x515c, "Beitong BTP-KP40D Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x515d, "Beitong BTP-KP40F Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x515e, "Beitong BTP-KP40F Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x515f, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5160, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x5169, "Beitong BTP-KP40F Controller (Black)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+++	{ 0x20bc, 0x516a, "Beitong BTP-KP40F Controller (Black)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++ 	{ 0x20d6, 0x2001, "BDA Xbox Series X Wired Controller", 0, XTYPE_XBOXONE },
++ 	{ 0x20d6, 0x2009, "PowerA Enhanced Wired Controller for Xbox Series X|S", 0, XTYPE_XBOXONE },
++ 	{ 0x20d6, 0x2064, "PowerA Wired Controller for Xbox", MAP_SHARE_BUTTON, XTYPE_XBOXONE },
++@@ -713,6 +752,14 @@
++ };
++ 
++ /*
+++ * Beitong/Betop KP-series controllers require this acknowledge/probe
+++ * exchange during initialisation before they will commit to keeping
+++ * their XInput (Xbox 360 reporting) personality.
+++ */
+++static const u8 btp_ack_probe_packet[] = { GIP_CMD_ACK, 0x03, GIP_SEQ0 };
+++static const u8 btp_probe_response_packet[] = { GIP_CMD_ANNOUNCE, 0x08, GIP_SEQ0 };
+++
+++/*
++  * This specifies the selection of init packets that a gamepad
++  * will be sent on init *and* the order in which they will be
++  * sent. The correct sequence number will be added when the
++@@ -727,6 +774,10 @@
++ 	XBOXONE_INIT_PKT(0x045e, 0x0b00, extra_input_packet_init),
++ 	XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_led_on),
++ 	XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_auth_done),
+++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
+++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_probe_response_packet),
+++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
+++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
++ 	XBOXONE_INIT_PKT(0x24c6, 0x541a, xboxone_rumblebegin_init),
++ 	XBOXONE_INIT_PKT(0x24c6, 0x542a, xboxone_rumblebegin_init),
++ 	XBOXONE_INIT_PKT(0x24c6, 0x543a, xboxone_rumblebegin_init),
++@@ -788,6 +839,7 @@
++ 	time64_t mode_btn_down_ts;
++ 	bool delay_init;		/* init packets should be delayed */
++ 	bool delayed_init_done;
+++	bool force_init;		/* send Xbox One init packets even on XTYPE_XBOX360 */
++ };
++ 
++ static int xpad_init_input(struct usb_xpad *xpad);
++@@ -1263,7 +1315,7 @@
++ {
++ 	const struct xboxone_init_packet *init_packet;
++ 
++-	if (xpad->xtype != XTYPE_XBOXONE)
+++	if (xpad->xtype != XTYPE_XBOXONE && !xpad->force_init)
++ 		return false;
++ 
++ 	/*
++@@ -1802,6 +1854,19 @@
++ 		 */
++ 		u8 dummy[20];
++ 
+++		/*
+++		 * Beitong/Betop KP-series controllers power-cycle themselves
+++		 * unless they observe the Xbox One acknowledge/probe exchange
+++		 * during initialisation. Without it they end up emulating a
+++		 * Nintendo Switch Pro Controller (057e:2009) instead.
+++		 */
+++		if (xpad->force_init) {
+++			guard(spinlock_irqsave)(&xpad->odata_lock);
+++
+++			xpad->init_seq = 0;
+++			xpad_try_sending_next_out_packet(xpad);
+++		}
+++
++ 		error = usb_control_msg_recv(xpad->udev, 0,
++ 					     /* bRequest */ 0x01,
++ 					     /* bmRequestType */
++@@ -2049,6 +2114,71 @@
++ 	return error;
++ }
++ 
+++/*
+++ * Microsoft OS descriptors
+++ *
+++ * Windows discovers a device's "XUSB10" compatible ID by requesting the
+++ * Microsoft OS descriptor at index 0xEE while enumerating. The Linux USB
+++ * core never issues that request, and the Beitong/Betop KP-series firmware
+++ * treats its absence as "this host is not an XInput host" and power-cycles
+++ * itself into Nintendo Switch emulation (057e:2009).
+++ *
+++ * Verified on a wired BTP-KP20D (20bc:5158): the firmware does NOT answer
+++ * the standard GET_DESCRIPTOR(STRING, 0xEE) - it times out - but it does
+++ * answer the literal vendor request bRequest=0xee, wValue=0, wIndex=4.
+++ * That single request is what pins it to XInput, so send it first while the
+++ * firmware's ~2s decision window is still open. The standard-descriptor and
+++ * compatible-ID forms are kept as fallbacks for other KP models.
+++ *
+++ * All requests go through usb_control_msg_recv(), which bounces the buffer;
+++ * plain usb_get_descriptor()/usb_control_msg() would DMA-map our stack
+++ * buffer and trip "transfer buffer is on stack" in the HCD.
+++ */
+++static void xpad_query_ms_os_descriptor(struct usb_device *udev)
+++{
+++	static const u8 msft100[] = {
+++		'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0
+++	};
+++	u8 buf[40];
+++	u8 vendor_code = 0x01;
+++	int str_ret, code_ret, raw_ret;
+++
+++	/* The request that actually works on the wired BTP-KP20D. */
+++	raw_ret = usb_control_msg_recv(udev, 0,
+++				       /* bRequest */ 0xee,
+++				       USB_TYPE_VENDOR | USB_DIR_IN |
+++						USB_RECIP_DEVICE,
+++				       /* wValue */ 0x0000,
+++				       /* wIndex */ 0x0004,
+++				       buf, sizeof(buf),
+++				       100, GFP_KERNEL);
+++
+++	/* Fallback: standard MS OS string descriptor, which carries the
+++	 * vendor request code the follow-up fetch should use. */
+++	str_ret = usb_control_msg_recv(udev, 0,
+++				       /* bRequest */ USB_REQ_GET_DESCRIPTOR,
+++				       USB_DIR_IN | USB_RECIP_DEVICE,
+++				       /* wValue */ (USB_DT_STRING << 8) | 0xee,
+++				       /* wIndex */ 0x0000,
+++				       buf, 18, 100, GFP_KERNEL);
+++	if (!str_ret && buf[0] == 0x12 && buf[1] == USB_DT_STRING &&
+++	    !memcmp(&buf[2], msft100, sizeof(msft100)))
+++		vendor_code = buf[16];
+++
+++	/* Fallback: fetch the XUSB10 compatible-ID descriptor. */
+++	code_ret = usb_control_msg_recv(udev, 0, vendor_code,
+++					USB_TYPE_VENDOR | USB_DIR_IN |
+++						USB_RECIP_DEVICE,
+++					/* wValue */ 0x0000,
+++					/* wIndex */ 0x0004,
+++					buf, sizeof(buf),
+++					100, GFP_KERNEL);
+++
+++	dev_info(&udev->dev,
+++		 "Beitong XInput handshake: MS OS (raw=%d str=%d code=0x%02x/%d)\n",
+++		 raw_ret, str_ret, vendor_code, code_ret);
+++}
+++
++ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id)
++ {
++ 	struct usb_device *udev = interface_to_usbdev(intf);
++@@ -2092,6 +2222,23 @@
++ 	xpad->name = xpad_device[i].name;
++ 	if (xpad_device[i].flags & FLAG_DELAY_INIT)
++ 		xpad->delay_init = true;
+++	if (xpad_device[i].flags & FLAG_FORCE_INIT)
+++		xpad->force_init = true;
+++
+++	/*
+++	 * Catch Beitong/Betop devices whose product ID is not in the table
+++	 * above (e.g. a wired BTP-KP20D): they all need the same init dance.
+++	 */
+++	if (beitong_force_init &&
+++	    le16_to_cpu(udev->descriptor.idVendor) == 0x20bc)
+++		xpad->force_init = true;
+++
+++	/*
+++	 * Do this as early as possible: the controller only stays in its
+++	 * XInput personality for about two seconds after enumeration.
+++	 */
+++	if (xpad->force_init)
+++		xpad_query_ms_os_descriptor(udev);
++ 
++ 	xpad->packet_type = PKT_XB;
++ 	INIT_WORK(&xpad->work, xpad_presence_work);
++@@ -2214,6 +2361,34 @@
++ 		error = xpad_init_input(xpad);
++ 		if (error)
++ 			goto err_deinit_output;
+++
+++		/*
+++		 * Beitong/Betop KP-series controllers only wait about two
+++		 * seconds in their XInput personality before power-cycling
+++		 * into the next one. Measured on a wired BTP-KP20D:
+++		 *
+++		 *   20bc:5158 "XINPUT WIRED"  ~2s
+++		 *   057e:2069 "NS WIRED"      ~2s
+++		 *   057e:2009 "Switch Pro"    ~2s
+++		 *
+++		 * ...repeated three times, then it stays on 057e:2009.
+++		 *
+++		 * So kick the handshake straight from probe() instead of
+++		 * waiting for userspace to open the input device, which can
+++		 * easily take longer than the window above.
+++		 */
+++		if (xpad->force_init) {
+++			int err;
+++
+++			guard(spinlock_irqsave)(&xpad->odata_lock);
+++
+++			xpad->init_seq = 0;
+++			err = xpad_try_sending_next_out_packet(xpad);
+++			if (err)
+++				dev_warn(&xpad->intf->dev,
+++					 "Beitong init packet submit failed: %d\n",
+++					 err);
+++		}
++ 	}
++ 	return 0;
++ 
+diff --git a/dkms.conf b/dkms.conf
+index c71fff5..4885b95 100644
+--- a/dkms.conf
++++ b/dkms.conf
+@@ -3,7 +3,7 @@ PACKAGE_VERSION="@PKGVER@"
+ BUILT_MODULE_NAME[0]="xpad"
+ BUILT_MODULE_LOCATION[0]="."
+ DEST_MODULE_LOCATION[0]="/updates/dkms"
+-MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build LLVM=1 modules"
+-CLEAN="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build LLVM=1 clean"
++MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build modules"
++CLEAN="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build clean"
+ AUTOINSTALL="yes"
+ REMAKE_INITRD="no"
+diff --git a/xpad-beitong-dkms.install b/xpad-beitong-dkms.install
+index d87bd2d..f022121 100644
+--- a/xpad-beitong-dkms.install
++++ b/xpad-beitong-dkms.install
+@@ -2,38 +2,35 @@
+ 
+ post_install() {
+   local ver="${1%%-*}"
+-  echo ":: Adding xpad-beitong/${ver} to DKMS..."
+-  dkms add "xpad-beitong/${ver}" 2>/dev/null || true
+-  dkms build "xpad-beitong/${ver}" 2>/dev/null || true
+-  dkms install "xpad-beitong/${ver}" 2>/dev/null || true
+-  echo ":: Loading patched xpad module..."
++  echo ":: Building and installing xpad-beitong/${ver} via DKMS..."
++  # Do NOT swallow the exit status here. Silently ignoring a failed build is
++  # how this package shipped broken: the user ends up with the stock xpad and
++  # no indication that anything went wrong.
++  if ! dkms install "xpad-beitong/${ver}" --force; then
++    echo "!! dkms install failed for $(uname -r)." >&2
++    echo "   Install the matching headers first, e.g. 'pacman -S linux-headers'," >&2
++    echo "   then re-run: sudo dkms install xpad-beitong/${ver} --force" >&2
++    return 1
++  fi
++  echo ":: Reloading xpad; unplug and replug the controller afterwards."
++  modprobe -r xpad 2>/dev/null || true
+   modprobe xpad 2>/dev/null || true
+-  echo ":: Done. Patched xpad module loaded."
+ }
+ 
+ ## arg 1: new package version
+ ## arg 2: old package version
+ 
+ post_upgrade() {
+-  local new_ver="${1%%-*}"
+   local old_ver="${2%%-*}"
+-
+-  dkms remove "xpad-beitong/${old_ver}" --all 2>/dev/null || true
+-
+-  dkms add "xpad-beitong/${new_ver}" 2>/dev/null || true
+-  dkms build "xpad-beitong/${new_ver}" 2>/dev/null || true
+-  dkms install "xpad-beitong/${new_ver}" 2>/dev/null || true
+-  echo ":: Reloading patched xpad module..."
+-  rmmod xpad 2>/dev/null || true
+-  modprobe xpad 2>/dev/null || true
++  dkms remove "xpad-beitong/${old_ver}" --all &>/dev/null || true
++  post_install "$1"
+ }
+ 
+ ## arg 1: old package version
+ 
+ pre_remove() {
+   local ver="${1%%-*}"
++  modprobe -r xpad 2>/dev/null || true
+   dkms remove "xpad-beitong/${ver}" --all 2>/dev/null || true
+-  rmmod xpad 2>/dev/null || true
+-  echo ":: xpad-beitong DKMS module removed."
+-  echo "   The stock xpad module can now be loaded via hotplug."
++  echo ":: xpad-beitong removed. The in-tree xpad takes over on next plug/unplug."
+ }
+-- 
+2.56.0
+

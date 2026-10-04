@@ -1,0 +1,254 @@
+--- a/drivers/input/joystick/xpad.c
++++ b/drivers/input/joystick/xpad.c
+@@ -72,11 +72,24 @@
+ #define PKT_XBE2_FW_5_11    4
+ 
+ #define FLAG_DELAY_INIT BIT(0)
++#define FLAG_FORCE_INIT BIT(1)	/* send Xbox One init packets even for XTYPE_XBOX360 */
+ 
+ static bool dpad_to_buttons;
+ module_param(dpad_to_buttons, bool, S_IRUGO);
+ MODULE_PARM_DESC(dpad_to_buttons, "Map D-PAD to buttons rather than axes for unknown pads");
+ 
++/*
++ * Beitong/Betop (VID 0x20bc) KP-series controllers boot into an Xbox
++ * personality and only stay there if the host sends them the Xbox One
++ * initialisation packets. Linux USB core does not do the Microsoft OS
++ * descriptor dance Windows does, so without this they power-cycle a few
++ * times and fall back to a Nintendo Switch Pro Controller emulation.
++ * Set to 0 to restore stock behaviour.
++ */
++static bool beitong_force_init = true;
++module_param(beitong_force_init, bool, 0644);
++MODULE_PARM_DESC(beitong_force_init, "Force Xbox One init packets for Beitong/Betop (0x20bc) controllers");
++
+ static bool triggers_to_buttons;
+ module_param(triggers_to_buttons, bool, S_IRUGO);
+ MODULE_PARM_DESC(triggers_to_buttons, "Map triggers to buttons rather than axes for unknown pads");
+@@ -341,6 +354,32 @@
+ 	{ 0x1ee9, 0x1590, "ZOTAC Gaming Zone", 0, XTYPE_XBOX360 },
+ 	{ 0x20bc, 0x5134, "BETOP BTP-KP50B Xinput Dongle", 0, XTYPE_XBOX360 },
+ 	{ 0x20bc, 0x514a, "BETOP BTP-KP50C Xinput Dongle", 0, XTYPE_XBOX360 },
++	{ 0x20bc, 0x5125, "Beitong BTP-KP20A/KP40A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5126, "Beitong BTP-KP20A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5127, "Beitong BTP-KP20A/KP40A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5128, "Beitong BTP-KP20A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x512f, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5130, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5133, "Beitong BTP-KP50B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5145, "Beitong BTP-KP40A/KP40B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5146, "Beitong BTP-KP40A/KP40B Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5149, "Beitong BTP-KP50C Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5150, "Beitong BTP-KP50D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5151, "Beitong BTP-KP50D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5152, "Beitong BTP-KP50E Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5153, "Beitong BTP-KP50E Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5154, "Beitong BTP-KP40D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5155, "Beitong BTP-KP40D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5158, "Beitong BTP-KP20D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5159, "Beitong BTP-KP20D Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x515b, "Beitong BTP-KP40D Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x515c, "Beitong BTP-KP40D Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x515d, "Beitong BTP-KP40F Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x515e, "Beitong BTP-KP40F Controller (White)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x515f, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5160, "Beitong BTP-KP70A Controller", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x5169, "Beitong BTP-KP40F Controller (Black)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
++	{ 0x20bc, 0x516a, "Beitong BTP-KP40F Controller (Black)", 0, XTYPE_XBOX360, FLAG_FORCE_INIT },
+ 	{ 0x20d6, 0x2001, "BDA Xbox Series X Wired Controller", 0, XTYPE_XBOXONE },
+ 	{ 0x20d6, 0x2009, "PowerA Enhanced Wired Controller for Xbox Series X|S", 0, XTYPE_XBOXONE },
+ 	{ 0x20d6, 0x2064, "PowerA Wired Controller for Xbox", MAP_SHARE_BUTTON, XTYPE_XBOXONE },
+@@ -713,6 +752,14 @@
+ };
+ 
+ /*
++ * Beitong/Betop KP-series controllers require this acknowledge/probe
++ * exchange during initialisation before they will commit to keeping
++ * their XInput (Xbox 360 reporting) personality.
++ */
++static const u8 btp_ack_probe_packet[] = { GIP_CMD_ACK, 0x03, GIP_SEQ0 };
++static const u8 btp_probe_response_packet[] = { GIP_CMD_ANNOUNCE, 0x08, GIP_SEQ0 };
++
++/*
+  * This specifies the selection of init packets that a gamepad
+  * will be sent on init *and* the order in which they will be
+  * sent. The correct sequence number will be added when the
+@@ -727,6 +774,10 @@
+ 	XBOXONE_INIT_PKT(0x045e, 0x0b00, extra_input_packet_init),
+ 	XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_led_on),
+ 	XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_auth_done),
++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_probe_response_packet),
++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
++	XBOXONE_INIT_PKT(0x20bc, 0x0000, btp_ack_probe_packet),
+ 	XBOXONE_INIT_PKT(0x24c6, 0x541a, xboxone_rumblebegin_init),
+ 	XBOXONE_INIT_PKT(0x24c6, 0x542a, xboxone_rumblebegin_init),
+ 	XBOXONE_INIT_PKT(0x24c6, 0x543a, xboxone_rumblebegin_init),
+@@ -788,6 +839,7 @@
+ 	time64_t mode_btn_down_ts;
+ 	bool delay_init;		/* init packets should be delayed */
+ 	bool delayed_init_done;
++	bool force_init;		/* send Xbox One init packets even on XTYPE_XBOX360 */
+ };
+ 
+ static int xpad_init_input(struct usb_xpad *xpad);
+@@ -1263,7 +1315,7 @@
+ {
+ 	const struct xboxone_init_packet *init_packet;
+ 
+-	if (xpad->xtype != XTYPE_XBOXONE)
++	if (xpad->xtype != XTYPE_XBOXONE && !xpad->force_init)
+ 		return false;
+ 
+ 	/*
+@@ -1802,6 +1854,19 @@
+ 		 */
+ 		u8 dummy[20];
+ 
++		/*
++		 * Beitong/Betop KP-series controllers power-cycle themselves
++		 * unless they observe the Xbox One acknowledge/probe exchange
++		 * during initialisation. Without it they end up emulating a
++		 * Nintendo Switch Pro Controller (057e:2009) instead.
++		 */
++		if (xpad->force_init) {
++			guard(spinlock_irqsave)(&xpad->odata_lock);
++
++			xpad->init_seq = 0;
++			xpad_try_sending_next_out_packet(xpad);
++		}
++
+ 		error = usb_control_msg_recv(xpad->udev, 0,
+ 					     /* bRequest */ 0x01,
+ 					     /* bmRequestType */
+@@ -2049,6 +2114,71 @@
+ 	return error;
+ }
+ 
++/*
++ * Microsoft OS descriptors
++ *
++ * Windows discovers a device's "XUSB10" compatible ID by requesting the
++ * Microsoft OS descriptor at index 0xEE while enumerating. The Linux USB
++ * core never issues that request, and the Beitong/Betop KP-series firmware
++ * treats its absence as "this host is not an XInput host" and power-cycles
++ * itself into Nintendo Switch emulation (057e:2009).
++ *
++ * Verified on a wired BTP-KP20D (20bc:5158): the firmware does NOT answer
++ * the standard GET_DESCRIPTOR(STRING, 0xEE) - it times out - but it does
++ * answer the literal vendor request bRequest=0xee, wValue=0, wIndex=4.
++ * That single request is what pins it to XInput, so send it first while the
++ * firmware's ~2s decision window is still open. The standard-descriptor and
++ * compatible-ID forms are kept as fallbacks for other KP models.
++ *
++ * All requests go through usb_control_msg_recv(), which bounces the buffer;
++ * plain usb_get_descriptor()/usb_control_msg() would DMA-map our stack
++ * buffer and trip "transfer buffer is on stack" in the HCD.
++ */
++static void xpad_query_ms_os_descriptor(struct usb_device *udev)
++{
++	static const u8 msft100[] = {
++		'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0
++	};
++	u8 buf[40];
++	u8 vendor_code = 0x01;
++	int str_ret, code_ret, raw_ret;
++
++	/* The request that actually works on the wired BTP-KP20D. */
++	raw_ret = usb_control_msg_recv(udev, 0,
++				       /* bRequest */ 0xee,
++				       USB_TYPE_VENDOR | USB_DIR_IN |
++						USB_RECIP_DEVICE,
++				       /* wValue */ 0x0000,
++				       /* wIndex */ 0x0004,
++				       buf, sizeof(buf),
++				       100, GFP_KERNEL);
++
++	/* Fallback: standard MS OS string descriptor, which carries the
++	 * vendor request code the follow-up fetch should use. */
++	str_ret = usb_control_msg_recv(udev, 0,
++				       /* bRequest */ USB_REQ_GET_DESCRIPTOR,
++				       USB_DIR_IN | USB_RECIP_DEVICE,
++				       /* wValue */ (USB_DT_STRING << 8) | 0xee,
++				       /* wIndex */ 0x0000,
++				       buf, 18, 100, GFP_KERNEL);
++	if (!str_ret && buf[0] == 0x12 && buf[1] == USB_DT_STRING &&
++	    !memcmp(&buf[2], msft100, sizeof(msft100)))
++		vendor_code = buf[16];
++
++	/* Fallback: fetch the XUSB10 compatible-ID descriptor. */
++	code_ret = usb_control_msg_recv(udev, 0, vendor_code,
++					USB_TYPE_VENDOR | USB_DIR_IN |
++						USB_RECIP_DEVICE,
++					/* wValue */ 0x0000,
++					/* wIndex */ 0x0004,
++					buf, sizeof(buf),
++					100, GFP_KERNEL);
++
++	dev_info(&udev->dev,
++		 "Beitong XInput handshake: MS OS (raw=%d str=%d code=0x%02x/%d)\n",
++		 raw_ret, str_ret, vendor_code, code_ret);
++}
++
+ static int xpad_probe(struct usb_interface *intf, const struct usb_device_id *id)
+ {
+ 	struct usb_device *udev = interface_to_usbdev(intf);
+@@ -2092,6 +2222,23 @@
+ 	xpad->name = xpad_device[i].name;
+ 	if (xpad_device[i].flags & FLAG_DELAY_INIT)
+ 		xpad->delay_init = true;
++	if (xpad_device[i].flags & FLAG_FORCE_INIT)
++		xpad->force_init = true;
++
++	/*
++	 * Catch Beitong/Betop devices whose product ID is not in the table
++	 * above (e.g. a wired BTP-KP20D): they all need the same init dance.
++	 */
++	if (beitong_force_init &&
++	    le16_to_cpu(udev->descriptor.idVendor) == 0x20bc)
++		xpad->force_init = true;
++
++	/*
++	 * Do this as early as possible: the controller only stays in its
++	 * XInput personality for about two seconds after enumeration.
++	 */
++	if (xpad->force_init)
++		xpad_query_ms_os_descriptor(udev);
+ 
+ 	xpad->packet_type = PKT_XB;
+ 	INIT_WORK(&xpad->work, xpad_presence_work);
+@@ -2214,6 +2361,34 @@
+ 		error = xpad_init_input(xpad);
+ 		if (error)
+ 			goto err_deinit_output;
++
++		/*
++		 * Beitong/Betop KP-series controllers only wait about two
++		 * seconds in their XInput personality before power-cycling
++		 * into the next one. Measured on a wired BTP-KP20D:
++		 *
++		 *   20bc:5158 "XINPUT WIRED"  ~2s
++		 *   057e:2069 "NS WIRED"      ~2s
++		 *   057e:2009 "Switch Pro"    ~2s
++		 *
++		 * ...repeated three times, then it stays on 057e:2009.
++		 *
++		 * So kick the handshake straight from probe() instead of
++		 * waiting for userspace to open the input device, which can
++		 * easily take longer than the window above.
++		 */
++		if (xpad->force_init) {
++			int err;
++
++			guard(spinlock_irqsave)(&xpad->odata_lock);
++
++			xpad->init_seq = 0;
++			err = xpad_try_sending_next_out_packet(xpad);
++			if (err)
++				dev_warn(&xpad->intf->dev,
++					 "Beitong init packet submit failed: %d\n",
++					 err);
++		}
+ 	}
+ 	return 0;
+ 

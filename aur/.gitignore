@@ -1,0 +1,8 @@
+# makepkg artifacts
+src/
+pkg/
+*.pkg.tar.*
+*.log
+
+# Downloaded source (fetched from git.kernel.org per the PKGBUILD)
+xpad.c

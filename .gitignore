@@ -1,0 +1,17 @@
+# 本地 AUR 克隆（带上游提交历史），不属于本仓库
+aur-contrib/
+
+# 编译 / 打包产物
+.build-test/
+src/
+pkg/
+*.pkg.tar.*
+*.o
+*.ko
+*.mod
+*.mod.c
+*.order
+*.symvers
+.tmp_versions/
+*.rej
+*.prepared

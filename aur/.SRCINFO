@@ -1,0 +1,20 @@
+pkgbase = xpad-beitong-dkms
+	pkgdesc = DKMS module for patched xpad with Beitong/Betop KP-series XInput handshake
+	pkgver = 2.0
+	pkgrel = 1
+	url = https://github.com/675076143/xpad-beitong-dkms
+	install = xpad-beitong-dkms.install
+	arch = any
+	license = GPL-2.0-only
+	makedepends = linux-headers
+	depends = dkms
+	source = xpad.c::https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/input/joystick/xpad.c?h=v7.2.8
+	source = beitong-ms-os-xinput.patch
+	source = Makefile
+	source = dkms.conf
+	sha256sums = 19dd00fc4b0341ef18575a87b9b3fbd5f809e4588ff2909e2c357af2f2358517
+	sha256sums = eae0fab6a391334421a9717ef117807d7895ea227d5f9bb5773a50a9e42bdec4
+	sha256sums = 73b8c36fe16fe1dd000c0fc397b2b97474856b1365e5187b9ff038247faf3940
+	sha256sums = 70d2b1ddee18c63c46ea7bc8ffdfb29c6afdfcb79c5868b00a5b98bbfb611152
+
+pkgname = xpad-beitong-dkms
